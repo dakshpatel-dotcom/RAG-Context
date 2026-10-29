@@ -12,7 +12,7 @@ The demo will be presented to the team to show what can be built. The user is a 
 - **Language: Python 3.12.10** (NOT 3.15, libraries don't support it yet), inside a private environment called `.venv`.
 - **Chopper: `chop.py`.** 40-line pieces, 8 lines overlap, each tagged with file name and line numbers. Skips fake demo data (paths containing "seed" or "prefill").
 - **Index and search: ChromaDB**, saved in the `chroma_db` folder, collection name `twenty_code`. Uses its built-in free search model (all-MiniLM-L6-v2).
-- **Writer (AI): OpenRouter** (key has $5 credit), using the `openai` library and model `openai/gpt-4o-mini`. Key is stored in the Windows variable `OPENROUTER_API_KEY` (never paste it in chat).
+- **Writer (AI): OpenRouter** (key has $5 credit), using the `openai` library. `ask.py` uses the cheap model `openai/gpt-4o-mini`; `impact.py` uses the stronger `openai/gpt-4o` (a few cents per report). The key is stored in the Windows variable `OPENROUTER_API_KEY`. It is read ONLY by name from that variable. NEVER type or paste the key into a script or into chat.
 - **Chat screen: Streamlit** (Phase 6).
 - **Method: RAG** (look up relevant material first, then answer), no AI training needed.
 
@@ -22,9 +22,22 @@ The demo will be presented to the team to show what can be built. The user is a 
 3. **Phase 1 Source code:** downloaded `twenty.zip`; `get_module.py` extracted 167 files into the `source` folder (`server` and `front` sub-folders). Works.
 4. **Phase 2 Chop:** `chop.py` read 157 files and created **421 chunks** in `chunks.json`. Works.
 5. **Phase 3 Index:** `build_index.py` stored 421 chunks in ChromaDB. Test searches returned the right files (e.g. `create-company.service.ts` for "where is a company created?"). Works.
-6. **Phase 4 Writer:** `ask.py` is written (searches, then the AI answers with sources) but NOT run yet.
+6. **Phase 4 Writer:** `ask.py` run and tested with 3 questions. Works.
+   - "Where is a company created and what happens when it is created?" returned a plain-English answer citing `create-company.service.ts`.
+   - "How are people linked to companies?" returned a grounded but partial answer (email domain is used to find the company, in `create-company-and-contact.service.ts`).
+   - "How does billing and payment work?" (out of scope on purpose) correctly replied "I couldn't find this in the material I was given." instead of making something up.
+7. **Phase 5 Fake Jira ticket impact report:** `ticket.txt` (fake ticket "Add Industry field to Companies") plus `impact.py`, which writes `impact_report.md`. Works well enough for the demo (see "What we learned" below).
 
-**Phase plan:** 0 Setup (done), 1 Source code (done), 2 Chop (done), 3 Index (done), 4 Writer with cited answers (script ready, not run), 5 Fake Jira ticket impact report, 6 Streamlit chat screen, 7 Presentation (3 live demos, 5 slides, limitations slide).
+**Phase plan:** 0 Setup (done), 1 Source code (done), 2 Chop (done), 3 Index (done), 4 Writer with cited answers (done), 5 Fake Jira ticket impact report (done), 6 Streamlit chat screen (next), 7 Presentation (3 live demos, 5 slides, limitations slide).
+
+## What we learned (use for the limitations slide)
+- The "Sources the AI read" list printed under each answer is the trustworthy part. Line numbers the AI writes inside its own answer are its guesses, because it only sees 40-line pieces.
+- Search matches on words, not meaning. It can miss related files that use different words. In the Industry ticket, our own keyword search found files that already carry industry data from an outside enrichment service (`to-workspace-company-enrichment.util.ts`, `sanitize-workspace-company-enrichment.util.ts` and the person versions), but they never reached the AI, so the report called enrichment "unclear".
+- Impact report v1 (one search, cheap model) was weak. v2 (5 search angles) found the field-definition file. v3 (6 angles, `gpt-4o`, stricter rules) names `compute-company-standard-flat-field-metadata.util.ts` as where the field is defined and finds `people-data-labs-company-data.type.ts` (already has an industry value), and it admits what it did not see (no backend filtering found).
+- Remaining weaknesses of the v3 report: lists `create-company.service.ts` first (weak pick), ignores the company page layout file, suggests an onboarding import file (stretch), and says the view-fields file must "support filtering" (it only controls columns).
+- Suggested limitations wording: "Search can miss related files that use different words, so the report is a draft for BA review, not a final answer." This matches the proposal: AI drafts, BA reviews and approves.
+- Our `source` folder only holds files extracted by keyword, so some definitions may simply not be in it.
+- Out-of-scope questions get an honest "I couldn't find this", which is good to show live.
 
 ## Current code
 **get_module.py** (Phase 1)
@@ -216,7 +229,7 @@ for q in tests:
         print(f"  {meta['file']}  (lines {meta['start_line']} to {meta['end_line']})")
 ```
 
-**ask.py** (Phase 4, written but not yet run)
+**ask.py** (Phase 4, works)
 ```python
 import os
 import chromadb
@@ -291,6 +304,118 @@ while True:
     answer(q)
 ```
 
+**ticket.txt** (Phase 5 fake Jira ticket)
+```
+Title: Add "Industry" field to Companies
+
+Client requirement: Our sales team wants to record which industry each company belongs to (for example Banking, Retail, Healthcare). The industry should be visible on the company list and on the company detail page, and users should be able to filter the company list by industry.
+```
+
+**impact.py** (Phase 5, works, current version v3)
+```python
+import os
+import chromadb
+from openai import OpenAI
+
+DB_FOLDER = "chroma_db"
+COLLECTION = "twenty_code"
+MODEL = "openai/gpt-4o"
+CHUNKS_PER_SEARCH = 5
+MAX_CHUNKS = 20
+TICKET_FILE = "ticket.txt"
+REPORT_FILE = "impact_report.md"
+
+ai = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ["OPENROUTER_API_KEY"],
+)
+db = chromadb.PersistentClient(path=DB_FOLDER)
+collection = db.get_collection(COLLECTION)
+
+SYSTEM_PROMPT = """You are a Product Co-Pilot for a CRM product.
+A new client requirement (a Jira ticket) has arrived. Write an impact report for a Business Analyst who is not a programmer.
+
+Rules:
+- Use ONLY the code excerpts provided. Do not guess.
+- Write in plain English. Explain any technical word you must use.
+- Only name files and line ranges that appear in the excerpt headers. Never invent a file name.
+- Go through the excerpts one by one before writing. Read each file name and its content, and be accurate about what it is about (a file about people is not about companies).
+- Any file that defines the fields of the thing named in the ticket (where its data columns are declared) MUST appear in section 2.
+- Look carefully for things the product ALREADY does that relate to the ticket, such as data that already exists or arrives from an outside service. Report these in section 3.
+- For every file you list, add one plain sentence saying what that file does and why it matters to this ticket.
+- If something the ticket needs is not covered by the excerpts, say so plainly in section 4, for example "I did not see where this is defined in the material I was given."
+
+Write the report with exactly these sections:
+## 1. What the ticket asks for
+(2 to 3 sentences)
+## 2. Areas likely affected
+(a short list; for each item give the file, line range, and one sentence on why)
+## 3. Existing parts that could be reused
+(a short list; for each item give the file and one sentence on what already exists)
+## 4. Risks, dependencies and gaps
+(a short list, including anything the excerpts did not cover)
+## 5. Questions for the team
+(2 to 4 questions the BA should clarify before work starts)
+## 6. Confidence
+(High, Medium or Low, with one sentence of reason)
+"""
+
+with open(TICKET_FILE, encoding="utf-8") as f:
+    ticket = f.read()
+
+title = ticket.splitlines()[0].replace("Title:", "").strip()
+
+# Search from several angles, then merge the results
+searches = [
+    ticket,
+    f"{title} where the field is defined (data model, database, metadata)",
+    f"{title} list screen columns and filters",
+    f"{title} detail page layout",
+    f"{title} existing data or feature that already covers this",
+    f"{title} data that already exists or is imported from an outside service",
+]
+
+print("Reading the ticket and searching the code from 6 angles...")
+picked = {}
+for query in searches:
+    found = collection.query(query_texts=[query], n_results=CHUNKS_PER_SEARCH)
+    for doc, meta in zip(found["documents"][0], found["metadatas"][0]):
+        key = (meta["file"], meta["start_line"], meta["end_line"])
+        if key not in picked:
+            picked[key] = (doc, meta)
+
+items = list(picked.values())[:MAX_CHUNKS]
+print(f"Collected {len(items)} different pieces of code.")
+
+material = ""
+for doc, meta in items:
+    material += (
+        f"\n--- {meta['file']} (lines {meta['start_line']} to {meta['end_line']}) ---\n"
+        f"{doc}\n"
+    )
+
+print("Writing the impact report (this can take up to a minute)...")
+reply = ai.chat.completions.create(
+    model=MODEL,
+    messages=[
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": f"Code excerpts:\n{material}\n\nJira ticket:\n{ticket}"},
+    ],
+)
+report = reply.choices[0].message.content
+
+with open(REPORT_FILE, "w", encoding="utf-8") as f:
+    f.write(report)
+
+print("\n" + "=" * 60)
+print(report)
+print("\nCode the AI was given:")
+for doc, meta in items:
+    print(f"  - {meta['file']} (lines {meta['start_line']} to {meta['end_line']})")
+print("=" * 60)
+print(f"\nReport also saved to {REPORT_FILE}")
+```
+
 **test_ai.py** (Phase 0, works)
 ```python
 import os
@@ -319,11 +444,18 @@ print(reply.choices[0].message.content)
 - **`IndentationError` after hand-editing a script:** Python needs exact spaces at the start of lines. Replace the whole file with the full version instead of editing by hand.
 - **Every new terminal must show `(.venv)`.** If not, run `.\.venv\Scripts\Activate.ps1`.
 - **A new chat did not know our phases:** chats do not share memory. Start a new chat by attaching this file (see the first message you send).
+- **`KeyError: 'sk-or-v1-...'` when running `ask.py`:** the API key itself had been typed inside `os.environ[...]` on line 12. That line must read exactly `api_key=os.environ["OPENROUTER_API_KEY"],` (the NAME of the Windows variable, never the key). Python prints the key in this error, which leaked it into chat. Fix: open the file, Ctrl+G to line 12, retype the line, then Ctrl+S.
+- **Edits seem to have no effect:** the file was not saved. A white dot on the file's tab means unsaved; press Ctrl+S until it turns into an X.
+- **Before pasting terminal output into chat:** scan it for anything starting with `sk-` and replace it with XXXX.
+- **Setting the key:** run `setx OPENROUTER_API_KEY "your-key"` once, then close the terminal and open a NEW one (Windows only reads new variables in new terminals). Check with: `if ($env:OPENROUTER_API_KEY) { "Key found" } else { "Key missing" }`.
+
+## Still to do before the presentation
+- **Replace the OpenRouter key.** The old key (starting `sk-or-v1-f909...`) was pasted into chat several times. Delete it at openrouter.ai/keys, create a new one, run `setx OPENROUTER_API_KEY "new-key"`, and open a fresh terminal. Never put the key in a file or in chat.
 
 ## Stuck on right now
-Nothing is broken. `ask.py` has not been run yet.
+Nothing is broken.
 
 ## Next step
-Run `python ask.py` (with `(.venv)` showing) and try 2 or 3 questions, for example "Where is a company created and what happens when it is created?". Paste the answers back to check they match the listed source files. Then start **Phase 5: fake Jira ticket impact report**.
+Start **Phase 6: Streamlit chat screen**. One new file (for example `app.py`) that gives a web page with a text box for questions and a button/box for the fake Jira ticket report, run with `streamlit run app.py`. Then Phase 7: presentation (3 live demos, 5 slides, limitations slide).
 
-**How we work:** the assistant writes every script in full, one small step at a time, and gives complete files rather than edits. The user runs it and pastes back the output or error. Do not skip phases.
+**How we work:** the assistant writes every script in full, one small step at a time, and gives complete files rather than edits. The user runs it and pastes back the output or error (after scanning for `sk-`). Do not skip phases.
